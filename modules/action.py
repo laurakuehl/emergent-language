@@ -39,7 +39,7 @@ class ActionModule(nn.Module):
         if self.using_utterances:
             x = torch.cat([physical.squeeze(1), utterance.squeeze(1), goal_processed], 1).squeeze(1)
         else:
-            x = torch.cat([physical.squeeze(0), goal_processed], 1).squeeze(1)
+            x = torch.cat([physical.squeeze(1), goal_processed], 1).squeeze(1)
         processed, mem = self.processor(x, mem)
         movement = self.movement_chooser(processed)
         if self.using_utterances:
@@ -51,8 +51,7 @@ class ActionModule(nn.Module):
                 if self.using_cuda:
                     utterance = utterance.cuda()
                 max_utter = utter.max(1)[1]
-                max_utter = max_utter.data[0]
-                utterance[0, max_utter] = 1
+                utterance.scatter_(1, max_utter.unsqueeze(1), 1.0)
         else:
             utterance = None
         final_movement = (movement * 2 * self.movement_step_size) - self.movement_step_size

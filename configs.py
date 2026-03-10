@@ -50,6 +50,8 @@ GameConfig = NamedTuple('GameConfig', [
     ('vocab_size', int),
     ('memory_size', int),
     ('use_cuda', bool),
+    ('holdout_combos', Any),
+    ('holdout_mode', str),
 ])
 
 ProcessingModuleConfig = NamedTuple('ProcessingModuleConfig', [
@@ -124,7 +126,9 @@ default_game_config = GameConfig(
         USE_UTTERANCES,
         DEFAULT_VOCAB_SIZE,
         DEFAULT_HIDDEN_SIZE,
-        False
+        False,
+        [],
+        "off"
         )
 
 if USE_UTTERANCES:
@@ -192,8 +196,27 @@ def get_game_config(kwargs):
             use_utterances=not kwargs['no_utterances'],
             vocab_size=kwargs['vocab_size'] or default_game_config.vocab_size,
             memory_size=default_game_config.memory_size,
-            use_cuda=kwargs['use_cuda']
+            use_cuda=kwargs['use_cuda'],
+            holdout_combos=parse_holdout_combos(kwargs.get('holdout_combos')),
+            holdout_mode=kwargs.get('holdout_mode') or "off"
             )
+
+
+def parse_holdout_combos(raw):
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    combos = []
+    for piece in str(raw).split(','):
+        token = piece.strip()
+        if not token:
+            continue
+        parts = token.replace(':', '-').split('-')
+        if len(parts) != 2:
+            raise ValueError("Invalid holdout combo '%s'. Expected 'color-shape' entries." % token)
+        combos.append((int(parts[0]), int(parts[1])))
+    return combos
 
 def get_agent_config(kwargs):
     vocab_size = kwargs['vocab_size'] or DEFAULT_VOCAB_SIZE
@@ -239,4 +262,3 @@ def get_agent_config(kwargs):
             penalize_words=penalize_words,
             use_cuda=use_cuda
             )
-

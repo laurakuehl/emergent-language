@@ -8,3 +8,12 @@ mypy.ini
 *.pyc
 venv/
 docker/
+.vscode
+
+# output
+ablation_runs/*
+evaluation/*
+model_weights/*
+
+# analysis
+analysis.ipynb

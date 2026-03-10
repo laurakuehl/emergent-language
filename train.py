@@ -1,4 +1,7 @@
 import argparse
+import inspect
+import json
+import random
 import numpy as np
 import torch
 from torch.optim import RMSprop
@@ -27,6 +30,11 @@ parser.add_argument('--oov-prob', '-o', type=int, help='higher value penalize un
 parser.add_argument('--load-model-weights', type=str, help='if specified start with saved model weights saved at file given by this argument')
 parser.add_argument('--save-model-weights', type=str, help='if specified save the model weights at file given by this argument')
 parser.add_argument('--use-cuda', action='store_true', help='if specified enables training on CUDA (default disabled)')
+parser.add_argument('--seed', type=int, help='if specified sets deterministic random seed')
+parser.add_argument('--metrics-jsonl', type=str, help='if specified appends per-epoch metrics as JSON lines to this file')
+parser.add_argument('--holdout-combos', type=str, help="comma-separated color-shape pairs (example: '0-1,2-0')")
+parser.add_argument('--holdout-mode', choices=['off', 'exclude', 'only'], default='off',
+                    help="when holdout combos are provided: 'exclude' for training on seen combos, 'only' for unseen-only evaluation")
 
 def print_losses(epoch, losses, dists, game_config):
     for a in range(game_config.min_agents, game_config.max_agents + 1):
@@ -42,6 +50,12 @@ def print_losses(epoch, losses, dists, game_config):
 
 def main():
     args = vars(parser.parse_args())
+    if args['seed'] is not None:
+        random.seed(args['seed'])
+        np.random.seed(args['seed'])
+        torch.manual_seed(args['seed'])
+        if args['use_cuda'] and torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args['seed'])
     agent_config = configs.get_agent_config(args)
     game_config = configs.get_game_config(args)
     training_config = configs.get_training_config(args)
@@ -50,10 +64,30 @@ def main():
     print(game_config)
     print(agent_config)
     agent = AgentModule(agent_config)
+    if training_config.load_model:
+        map_location = None if training_config.use_cuda else "cpu"
+        try:
+            loaded = torch.load(
+                training_config.load_model_file,
+                map_location=map_location,
+                weights_only=False
+            )
+        except TypeError:
+            loaded = torch.load(
+                training_config.load_model_file,
+                map_location=map_location
+            )
+        if hasattr(loaded, "state_dict"):
+            agent = loaded
+        else:
+            agent.load_state_dict(loaded)
     if training_config.use_cuda:
         agent.cuda()
     optimizer = RMSprop(agent.parameters(), lr=training_config.learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', verbose=True, cooldown=5)
+    scheduler_kwargs = {"mode": "min", "cooldown": 5}
+    if "verbose" in inspect.signature(ReduceLROnPlateau.__init__).parameters:
+        scheduler_kwargs["verbose"] = True
+    scheduler = ReduceLROnPlateau(optimizer, **scheduler_kwargs)
     losses = defaultdict(lambda:defaultdict(list))
     dists = defaultdict(lambda:defaultdict(list))
     for epoch in range(training_config.num_epochs):
@@ -66,11 +100,11 @@ def main():
         optimizer.zero_grad()
 
         total_loss, _ = agent(game)
-        per_agent_loss = total_loss.data[0] / num_agents / game_config.batch_size
+        per_agent_loss = total_loss.item() / num_agents / game_config.batch_size
         losses[num_agents][num_landmarks].append(per_agent_loss)
 
         dist = game.get_avg_agent_to_goal_distance()
-        avg_dist = dist.data[0] / num_agents / game_config.batch_size
+        avg_dist = dist.item() / num_agents / game_config.batch_size
         dists[num_agents][num_landmarks].append(avg_dist)
 
         print_losses(epoch, losses, dists, game_config)
@@ -80,6 +114,17 @@ def main():
 
         if num_agents == game_config.max_agents and num_landmarks == game_config.max_landmarks:
             scheduler.step(losses[game_config.max_agents][game_config.max_landmarks][-1])
+
+        if args['metrics_jsonl']:
+            payload = {
+                "epoch": epoch,
+                "num_agents": int(num_agents),
+                "num_landmarks": int(num_landmarks),
+                "per_agent_loss": float(per_agent_loss),
+                "avg_dist": float(avg_dist)
+            }
+            with open(args['metrics_jsonl'], 'a') as f:
+                f.write(json.dumps(payload) + "\n")
 
     if training_config.save_model:
         torch.save(agent, training_config.save_model_file)
@@ -92,4 +137,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

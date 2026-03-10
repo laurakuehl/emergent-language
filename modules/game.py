@@ -35,6 +35,8 @@ class GameModule(nn.Module):
         self.num_agents = num_agents # scalar: number of agents in this batch
         self.num_landmarks = num_landmarks # scalar: number of landmarks in this batch
         self.num_entities = self.num_agents + self.num_landmarks # type: int
+        self.holdout_combos = set(getattr(config, "holdout_combos", []))
+        self.holdout_mode = getattr(config, "holdout_mode", "off")
 
         if self.using_cuda:
             self.Tensor = torch.cuda.FloatTensor
@@ -46,7 +48,7 @@ class GameModule(nn.Module):
         shapes = (torch.rand(self.batch_size, self.num_entities, 1) * config.num_shapes).floor()
 
         goal_agents = self.Tensor(self.batch_size, self.num_agents, 1)
-        goal_entities = (torch.rand(self.batch_size, self.num_agents, 1) * self.num_landmarks).floor().long() + self.num_agents
+        goal_entities = self._sample_goal_entities(colors, shapes) + self.num_agents
         goal_locations = self.Tensor(self.batch_size, self.num_agents, 2)
 
         if self.using_cuda:
@@ -62,7 +64,7 @@ class GameModule(nn.Module):
 
         #TODO: Bad for loop?
         for b in range(self.batch_size):
-            goal_agents[b] = torch.randperm(self.num_agents)
+            goal_agents[b, :, 0] = torch.randperm(self.num_agents).type_as(goal_agents[b, :, 0])
 
         for b in range(self.batch_size):
             goal_locations[b] = self.locations.data[b][goal_entities[b].squeeze()]
@@ -107,6 +109,40 @@ class GameModule(nn.Module):
         self.observed_goals = torch.cat((new_obs, goal_agents), dim=2)
 
 
+    def _is_holdout_combo(self, color, shape):
+        return (int(color), int(shape)) in self.holdout_combos
+
+    def _sample_goal_entities(self, colors, shapes):
+        if self.holdout_mode not in ("exclude", "only") or not self.holdout_combos:
+            return (torch.rand(self.batch_size, self.num_agents, 1) * self.num_landmarks).floor().long()
+
+        landmark_colors = colors[:, self.num_agents:, 0].long()
+        landmark_shapes = shapes[:, self.num_agents:, 0].long()
+        goal_entities = torch.zeros(self.batch_size, self.num_agents, 1).long()
+        all_landmarks = list(range(self.num_landmarks))
+
+        for b in range(self.batch_size):
+            candidates = []
+            for lm in all_landmarks:
+                is_holdout = self._is_holdout_combo(
+                    landmark_colors[b, lm].item(),
+                    landmark_shapes[b, lm].item()
+                )
+                if self.holdout_mode == "exclude" and not is_holdout:
+                    candidates.append(lm)
+                if self.holdout_mode == "only" and is_holdout:
+                    candidates.append(lm)
+
+            if not candidates:
+                candidates = all_landmarks
+
+            for a in range(self.num_agents):
+                sample_idx = torch.randint(0, len(candidates), (1,)).item()
+                goal_entities[b, a, 0] = candidates[sample_idx]
+
+        return goal_entities
+
+
 
     """
     Updates game state given all movements and utterances and returns accrued cost
@@ -132,7 +168,10 @@ class GameModule(nn.Module):
     def compute_cost(self, movements, goal_predictions, utterances=None):
         physical_cost = self.compute_physical_cost()
         movement_cost = self.compute_movement_cost(movements)
-        goal_pred_cost = self.compute_goal_pred_cost(goal_predictions)
+        if goal_predictions is None:
+            goal_pred_cost = 0.0
+        else:
+            goal_pred_cost = self.compute_goal_pred_cost(goal_predictions)
         return physical_cost + goal_pred_cost + movement_cost
 
     """
@@ -194,4 +233,3 @@ class GameModule(nn.Module):
                             -1)
                         )
                     )
-
